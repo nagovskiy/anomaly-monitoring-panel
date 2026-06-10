@@ -1,15 +1,118 @@
-from __future__ import annotations
+import base64
+import hashlib
+import hmac
+import json
+import time
+from typing import Dict, List
 
-from typing import List
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sklearn.compose import ColumnTransformer
 from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
+
+# =========================
+# Авторизация
+# =========================
+
+SECRET_KEY = "change-this-secret-key-for-production"
+TOKEN_TTL_SECONDS = 60 * 60 * 8
+
+DEMO_USER = {
+    "login": "analyst",
+    "password_hash": hashlib.sha256("analyst123".encode("utf-8")).hexdigest(),
+}
+
+
+class LoginRequest(BaseModel):
+    login: str
+    password: str
+
+
+def base64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
+
+
+def base64url_decode(data: str) -> bytes:
+    padding = "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode(data + padding)
+
+
+def create_access_token(payload: Dict) -> str:
+    header = {
+        "alg": "HS256",
+        "typ": "JWT",
+    }
+
+    token_payload = {
+        **payload,
+        "exp": int(time.time()) + TOKEN_TTL_SECONDS,
+    }
+
+    header_encoded = base64url_encode(
+        json.dumps(header, separators=(",", ":")).encode("utf-8")
+    )
+
+    payload_encoded = base64url_encode(
+        json.dumps(token_payload, separators=(",", ":")).encode("utf-8")
+    )
+
+    message = f"{header_encoded}.{payload_encoded}".encode("utf-8")
+
+    signature = hmac.new(
+        SECRET_KEY.encode("utf-8"),
+        message,
+        hashlib.sha256,
+    ).digest()
+
+    signature_encoded = base64url_encode(signature)
+
+    return f"{header_encoded}.{payload_encoded}.{signature_encoded}"
+
+
+def verify_access_token(token: str) -> Dict:
+    try:
+        header_encoded, payload_encoded, signature_encoded = token.split(".")
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Некорректный токен")
+
+    message = f"{header_encoded}.{payload_encoded}".encode("utf-8")
+
+    expected_signature = hmac.new(
+        SECRET_KEY.encode("utf-8"),
+        message,
+        hashlib.sha256,
+    ).digest()
+
+    actual_signature = base64url_decode(signature_encoded)
+
+    if not hmac.compare_digest(expected_signature, actual_signature):
+        raise HTTPException(status_code=401, detail="Недействительный токен")
+
+    payload = json.loads(base64url_decode(payload_encoded).decode("utf-8"))
+
+    if int(payload.get("exp", 0)) < int(time.time()):
+        raise HTTPException(status_code=401, detail="Срок действия токена истек")
+
+    return payload
+
+
+def get_current_user(authorization: str = Header(default="")) -> Dict:
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Требуется авторизация")
+
+    token = authorization.replace("Bearer ", "", 1)
+
+    return verify_access_token(token)
+
+
+# =========================
+# Модели данных
+# =========================
 
 class Transaction(BaseModel):
     client_id: str
@@ -24,6 +127,10 @@ class AnalyzeRequest(BaseModel):
     transactions: List[Transaction]
 
 
+# =========================
+# Инициализация FastAPI
+# =========================
+
 app = FastAPI(title="Anomaly Monitoring API", version="1.0")
 
 app.add_middleware(
@@ -33,6 +140,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# =========================
+# Нейросетевое ядро
+# =========================
 
 RNG = np.random.default_rng(42)
 
@@ -48,8 +160,18 @@ train_error_std: float = 1.0
 def generate_normal_training_data(n: int = 2000) -> pd.DataFrame:
     amounts = np.clip(RNG.normal(12000, 4500, n), 500, 40000)
     frequencies = np.clip(RNG.normal(3.2, 1.1, n).round(), 1, 10).astype(int)
-    channels = RNG.choice(["branch", "mobile", "online"], size=n, p=[0.45, 0.35, 0.20])
-    categories = RNG.choice(["payment", "transfer", "topup"], size=n, p=[0.45, 0.40, 0.15])
+
+    channels = RNG.choice(
+        ["branch", "mobile", "online"],
+        size=n,
+        p=[0.45, 0.35, 0.20],
+    )
+
+    categories = RNG.choice(
+        ["payment", "transfer", "topup"],
+        size=n,
+        p=[0.45, 0.40, 0.15],
+    )
 
     return pd.DataFrame(
         {
@@ -99,16 +221,20 @@ def build_model() -> None:
 def score_to_level(score: float) -> str:
     if score < 35:
         return "Низкий"
+
     if score < 70:
         return "Средний"
+
     return "Высокий"
 
 
 def score_to_flag(score: float) -> str:
     if score < 35:
         return "Норма"
+
     if score < 70:
         return "Нужно наблюдение"
+
     return "Требует проверки"
 
 
@@ -118,12 +244,14 @@ def analyze_transactions(df: pd.DataFrame) -> list[dict]:
 
     X = preprocessor.transform(df)
     X_pred = model.predict(X)
+
     errors = np.mean((X - X_pred) ** 2, axis=1)
 
     scored_rows: list[dict] = []
 
     for idx, row in df.iterrows():
         error = float(errors[idx])
+
         score = ((error - train_error_mean) / train_error_std) * 15.0 + 40.0
         score = float(np.clip(score, 0, 100))
 
@@ -145,6 +273,10 @@ def analyze_transactions(df: pd.DataFrame) -> list[dict]:
     return scored_rows
 
 
+# =========================
+# Endpoint'ы
+# =========================
+
 @app.on_event("startup")
 def startup_event() -> None:
     build_model()
@@ -155,8 +287,27 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+@app.post("/login")
+def login_user(data: LoginRequest) -> dict:
+    password_hash = hashlib.sha256(data.password.encode("utf-8")).hexdigest()
+
+    if data.login != DEMO_USER["login"] or password_hash != DEMO_USER["password_hash"]:
+        raise HTTPException(status_code=401, detail="Неверный логин или пароль")
+
+    token = create_access_token({"sub": data.login})
+
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": data.login,
+    }
+
+
 @app.post("/analyze")
-def analyze(request: AnalyzeRequest) -> dict:
+def analyze(
+    request: AnalyzeRequest,
+    current_user: Dict = Depends(get_current_user),
+) -> dict:
     if not request.transactions:
         return {
             "summary": {
@@ -170,12 +321,14 @@ def analyze(request: AnalyzeRequest) -> dict:
         }
 
     df = pd.DataFrame([item.model_dump() for item in request.transactions])
+
     results = analyze_transactions(df)
 
     total = len(results)
     low = sum(1 for r in results if r["risk_level"] == "Низкий")
     medium = sum(1 for r in results if r["risk_level"] == "Средний")
     high = sum(1 for r in results if r["risk_level"] == "Высокий")
+
     avg_score = round(sum(r["anomaly_score"] for r in results) / total, 2)
 
     return {
@@ -187,4 +340,5 @@ def analyze(request: AnalyzeRequest) -> dict:
             "average_score": avg_score,
         },
         "results": results,
+        "user": current_user.get("sub"),
     }

@@ -2,13 +2,15 @@ import React from "react";
 import { motion } from "framer-motion";
 import { BarChart3 } from "lucide-react";
 import {
-  Area,
-  AreaChart,
+  Bar,
+  BarChart,
   CartesianGrid,
   Cell,
+  LabelList,
   Legend,
   Pie,
   PieChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -17,9 +19,49 @@ import {
 
 import SectionTitle from "./SectionTitle.jsx";
 
+const MotionSection = motion.section;
+const HIGH_RISK_THRESHOLD = 70;
+const RISK_COLORS = {
+  Низкий: "#22c55e",
+  Средний: "#f59e0b",
+  Высокий: "#ef4444",
+};
+
+function getRiskColor(level) {
+  return RISK_COLORS[level] || "#06b6d4";
+}
+
+function formatScore(value) {
+  const score = Number(value);
+
+  if (!Number.isFinite(score)) return value;
+
+  return Number.isInteger(score) ? String(score) : score.toFixed(1);
+}
+
+function RiskBarTooltip({ active, payload }) {
+  if (!active || !payload?.length) return null;
+
+  const row = payload[0].payload;
+
+  return (
+    <div className="chart-tooltip">
+      <div className="chart-tooltip__label">{row.name}</div>
+      <div className="chart-tooltip__row">
+        <span>Балл риска</span>
+        <strong>{formatScore(row.score)}</strong>
+      </div>
+      <div className="chart-tooltip__row">
+        <span>Уровень</span>
+        <strong style={{ color: getRiskColor(row.riskLevel) }}>{row.riskLevel}</strong>
+      </div>
+    </div>
+  );
+}
+
 export default function RiskCharts({ sourceName, stats, timelineData, chartData, colors, loading, error, children }) {
   return (
-    <motion.section
+    <MotionSection
       className="card wide"
       initial={{ opacity: 0, y: 16 }}
       animate={{ opacity: 1, y: 0 }}
@@ -36,7 +78,7 @@ export default function RiskCharts({ sourceName, stats, timelineData, chartData,
           <strong style={{ display: "block", marginTop: 6, fontSize: 22, color: "#f8fafc" }}>{stats.highRatio}%</strong>
         </div>
         <div style={{ borderRadius: 18, padding: 14, background: "rgba(2,6,23,0.72)", border: "1px solid rgba(148,163,184,0.14)" }}>
-          <div style={{ color: "#94a3b8", fontSize: 12, textTransform: "uppercase", letterSpacing: "0.08em" }}>Средний риск</div>
+          <div style={{ color: "#94a3b8", fontSize: 12, textTransform: "uppercase", letterSpacing: "0.08em" }}>Средний балл</div>
           <strong style={{ display: "block", marginTop: 6, fontSize: 22, color: "#f8fafc" }}>{stats.avg}</strong>
         </div>
         <div style={{ borderRadius: 18, padding: 14, background: "rgba(2,6,23,0.72)", border: "1px solid rgba(148,163,184,0.14)" }}>
@@ -46,22 +88,66 @@ export default function RiskCharts({ sourceName, stats, timelineData, chartData,
       </div>
 
       <div className="charts-grid" style={{ marginTop: 18 }}>
-        <div className="chart-box">
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={timelineData}>
-              <defs>
-                <linearGradient id="scoreGradient" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#06b6d4" stopOpacity={0.8} />
-                  <stop offset="95%" stopColor="#06b6d4" stopOpacity={0.05} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-              <XAxis dataKey="name" stroke="#94a3b8" />
-              <YAxis stroke="#94a3b8" />
-              <Tooltip contentStyle={{ background: "#020617", border: "1px solid #334155", borderRadius: 12, color: "#e2e8f0" }} />
-              <Area type="monotone" dataKey="score" stroke="#06b6d4" fill="url(#scoreGradient)" />
-            </AreaChart>
-          </ResponsiveContainer>
+        <div className="chart-box chart-box--bars">
+          <div className="chart-heading">
+            <div>
+              <span>Дискретные значения</span>
+              <strong>Оценка риска по клиентам</strong>
+            </div>
+            <div className="chart-threshold">Порог высокого риска: {HIGH_RISK_THRESHOLD}</div>
+          </div>
+
+          <div className="chart-canvas">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart
+                data={timelineData}
+                margin={{ top: 28, right: 10, left: 0, bottom: 0 }}
+                barCategoryGap={timelineData.length > 12 ? "18%" : "28%"}
+              >
+                <CartesianGrid vertical={false} strokeDasharray="4 4" stroke="rgba(148,163,184,0.16)" />
+                <XAxis
+                  dataKey="name"
+                  stroke="#94a3b8"
+                  tick={{ fill: "#94a3b8", fontSize: 12 }}
+                  tickLine={false}
+                  axisLine={{ stroke: "rgba(148,163,184,0.22)" }}
+                  interval={timelineData.length > 12 ? "preserveStartEnd" : 0}
+                  tickMargin={10}
+                />
+                <YAxis
+                  domain={[0, 105]}
+                  ticks={[0, 25, 50, 75, 100]}
+                  stroke="#94a3b8"
+                  tick={{ fill: "#94a3b8", fontSize: 12 }}
+                  tickLine={false}
+                  axisLine={false}
+                  width={42}
+                />
+                <Tooltip cursor={{ fill: "rgba(34,211,238,0.08)" }} content={<RiskBarTooltip />} />
+                <ReferenceLine
+                  y={HIGH_RISK_THRESHOLD}
+                  stroke="#f87171"
+                  strokeDasharray="6 5"
+                  strokeWidth={2}
+                />
+                <Bar dataKey="score" name="Балл риска" radius={[8, 8, 4, 4]} maxBarSize={46} animationDuration={700}>
+                  {timelineData.map((entry) => (
+                    <Cell key={`${entry.name}-${entry.order}`} fill={getRiskColor(entry.riskLevel)} />
+                  ))}
+                  <LabelList dataKey="score" position="top" fill="#f8fafc" fontSize={12} fontWeight={700} formatter={formatScore} />
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+
+          <div className="risk-legend">
+            {Object.entries(RISK_COLORS).map(([level, color]) => (
+              <span key={level}>
+                <i style={{ background: color, boxShadow: `0 0 14px ${color}66` }} />
+                {level}
+              </span>
+            ))}
+          </div>
         </div>
 
         <div className="chart-box">
@@ -80,7 +166,6 @@ export default function RiskCharts({ sourceName, stats, timelineData, chartData,
       </div>
 
       {children}
-    </motion.section>
+    </MotionSection>
   );
 }
-
